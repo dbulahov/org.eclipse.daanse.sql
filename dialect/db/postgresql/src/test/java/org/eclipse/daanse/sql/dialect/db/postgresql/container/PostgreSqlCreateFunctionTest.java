@@ -7,7 +7,7 @@
  *
  * SPDX-License-Identifier: EPL-2.0
  */
-package org.eclipse.daanse.sql.dialect.db.postgresql.integration;
+package org.eclipse.daanse.sql.dialect.db.postgresql.container;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
