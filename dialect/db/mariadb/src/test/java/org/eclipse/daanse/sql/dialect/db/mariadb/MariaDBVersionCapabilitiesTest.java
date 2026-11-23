@@ -33,11 +33,16 @@ class MariaDBVersionCapabilitiesTest {
         assertTrue(dialect(10, 6).requiresOrderByAlias());
     }
 
+    /**
+     * MariaDB has the percentiles as window functions only, with an OVER clause; as an aggregate of a group, as the
+     * dialect writes them, it refuses them on every version (MariaDBPercentileTest runs them against the server).
+     */
     @Test
-    void twoDigitMajorSupportsPercentiles() {
-        assertTrue(dialect(11, 4).supportsPercentileDisc());
-        assertTrue(dialect(11, 4).supportsPercentileCont());
-        assertTrue(dialect(10, 6).supportsPercentileDisc());
+    void noPercentilesOfAGroupOnAnyVersion() {
+        assertFalse(dialect(11, 4).supportsPercentileDisc());
+        assertFalse(dialect(11, 4).supportsPercentileCont());
+        assertFalse(dialect(10, 6).supportsPercentileDisc());
+        assertTrue(dialect(11, 4).generatePercentileCont(0.5, false, "t", "v").isEmpty());
     }
 
     @Test
@@ -49,7 +54,5 @@ class MariaDBVersionCapabilitiesTest {
     void oldMySqlStyleVersionsStillGateCorrectly() {
         assertFalse(dialect(5, 6).requiresOrderByAlias());
         assertTrue(dialect(5, 7).requiresOrderByAlias());
-        assertFalse(dialect(5, 7).supportsPercentileDisc());
-        assertTrue(dialect(8, 0).supportsPercentileDisc());
     }
 }

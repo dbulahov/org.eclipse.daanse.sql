@@ -156,10 +156,12 @@ public record DialectInitData(String quoteIdentifierString, String productName, 
 
     /**
      * {@link DialectVersion} view of {@link #databaseMajorVersion} /
-     * {@link #databaseMinorVersion}.
+     * {@link #databaseMinorVersion}, with the patch of {@link #productVersion} where that names the same major and
+     * minor: a check of a patch ({@code 5.7.8}, {@code 8.0.19}) took every version of its minor for its {@code .0}
+     * before.
      */
     public DialectVersion version() {
-        return new DialectVersion(databaseMajorVersion, databaseMinorVersion);
+        return DialectVersion.of(databaseMajorVersion, databaseMinorVersion, productVersion);
     }
 
     /** Returns a copy with a different {@link IdentifierQuotingPolicy}. */

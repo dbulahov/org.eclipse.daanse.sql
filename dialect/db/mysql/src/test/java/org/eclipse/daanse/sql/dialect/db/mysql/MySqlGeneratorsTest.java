@@ -95,12 +95,23 @@ class MySqlGeneratorsTest {
                 .isEqualTo(" LIMIT 40, 18446744073709551615");
     }
 
+    /** A dialect without a version takes a current MySQL, and reads the row by its alias, as 8.0.19 does. */
     @Test
     void upsert_on_duplicate_key_update() {
         MergeGenerator.UpsertSpec spec = upsertSpec(table("test", "USERS"), "ID", "NAME");
         String sql = d.mergeGenerator().upsert(spec, List.of("1", "'foo'")).orElseThrow();
         assertThat(sql).contains("INSERT INTO `test`.`USERS`")
-                .contains("ON DUPLICATE KEY UPDATE `NAME` = VALUES(`NAME`)");
+                .contains("VALUES (1, 'foo') AS `new_row` ON DUPLICATE KEY UPDATE `NAME` = `new_row`.`NAME`");
+    }
+
+    /** Before 8.0.19 the row is read with VALUES(col). */
+    @Test
+    void upsert_on_duplicate_key_update_before_8_0_19() {
+        MySqlDialect d57 = new MySqlDialect(org.eclipse.daanse.sql.dialect.api.DialectInitData.ansiDefaults()
+                .withQuoteIdentifierString("`").withVersion(5, 7));
+        MergeGenerator.UpsertSpec spec = upsertSpec(table("test", "USERS"), "ID", "NAME");
+        String sql = d57.mergeGenerator().upsert(spec, List.of("1", "'foo'")).orElseThrow();
+        assertThat(sql).contains("ON DUPLICATE KEY UPDATE `NAME` = VALUES(`NAME`)").doesNotContain("new_row");
     }
 
     @Test
