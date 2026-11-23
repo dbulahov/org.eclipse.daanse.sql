@@ -265,12 +265,15 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
         String qualified = schemaName != null && !schemaName.isBlank()
                 ? quoteIdentifier(schemaName, procedureName).toString()
                 : quoteIdentifier(procedureName).toString();
-        return Optional.of("CREATE OR REPLACE FUNCTION " + qualified + "() RETURNS trigger LANGUAGE plpgsql AS $$ "
-                + body + " $$");
+        // the body in a dollar quote that does not occur in it, as createFunction writes one
+        return Optional.of("CREATE OR REPLACE FUNCTION " + qualified + "() RETURNS trigger LANGUAGE plpgsql AS "
+                + dollarQuoted(body));
     }
 
     /**
-     * PostgreSQL: {@code CREATE TRIGGER … EXECUTE FUNCTION schema.procedureName()}.
+     * PostgreSQL: {@code CREATE TRIGGER … EXECUTE FUNCTION schema.procedureName()}, since 11; before that
+     * {@code EXECUTE PROCEDURE}, which 11 still reads but no longer documents. A dialect made without a connection
+     * knows no version and writes {@code EXECUTE FUNCTION}.
      */
     @Override
     public String createTriggerUsingProcedure(String triggerName, String schemaName,
@@ -283,7 +286,8 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
                 ? quoteIdentifier(schemaName, procedureName).toString()
                 : quoteIdentifier(procedureName).toString();
         return createTrigger(triggerName, timing, event, table, scope, whenCondition,
-                "EXECUTE FUNCTION " + qualified + "()");
+                (dialectVersion.isUnknownOrAtLeast(11, 0) ? "EXECUTE FUNCTION " : "EXECUTE PROCEDURE ") + qualified
+                        + "()");
     }
 
     /** PostgreSQL: {@code DROP FUNCTION [IF EXISTS] schema.procedureName()}. */
@@ -324,8 +328,9 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
 
     @Override
     public StringBuilder generateOrderByNulls(CharSequence expr, boolean ascending, boolean collateNullsLast) {
-        // Support for "ORDER BY ... NULLS LAST" was introduced in Postgres 8.3.
-        if (productVersion.compareTo("8.3") >= 0) {
+        // Support for "ORDER BY ... NULLS LAST" was introduced in Postgres 8.3. The version is compared as numbers:
+        // as strings "10.23" came before "8.3", and every PostgreSQL from 10 on wrote the CASE WHEN of the fallback.
+        if (dialectVersion.isUnknownOrAtLeast(8, 3)) {
             return generateOrderByNullsAnsi(expr, ascending, collateNullsLast);
         } else {
             return super.generateOrderByNulls(expr, ascending, collateNullsLast);
@@ -472,6 +477,9 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
 
     @Override
     public java.util.Optional<String> generateBitAggregation(BitOperation operation, CharSequence operand) {
+        if (!supportsBitAggregation(operation)) {
+            return java.util.Optional.empty();
+        }
         StringBuilder buf = new StringBuilder(64);
         StringBuilder result = switch (operation) {
         case AND -> buf.append("bit_and(").append(operand).append(")");
@@ -487,14 +495,24 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
         return java.util.Optional.of(result.toString());
     }
 
+    /**
+     * PostgreSQL has {@code bit_and} and {@code bit_or} of old, {@code bit_xor} only since 14: XOR and NXOR need 14.
+     * A dialect made without a connection knows no version and says yes.
+     */
     @Override
     public boolean supportsBitAggregation(BitOperation operation) {
-        return true; // PostgreSQL supports all bit operations
+        return switch (operation) {
+        case XOR, NXOR -> dialectVersion.isUnknownOrAtLeast(14, 0);
+        case AND, OR, NAND, NOR -> true;
+        };
     }
 
     @Override
     public java.util.Optional<String> generatePercentileDisc(double percentile, boolean desc, String tableName,
             String columnName) {
+        if (!supportsPercentileDisc()) {
+            return java.util.Optional.empty();
+        }
         return java.util.Optional
                 .of((buildPercentileFunction("PERCENTILE_DISC", percentile, desc, tableName, columnName)).toString());
     }
@@ -502,6 +520,9 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
     @Override
     public java.util.Optional<String> generatePercentileCont(double percentile, boolean desc, String tableName,
             String columnName) {
+        if (!supportsPercentileCont()) {
+            return java.util.Optional.empty();
+        }
         return java.util.Optional
                 .of((buildPercentileFunction("PERCENTILE_CONT", percentile, desc, tableName, columnName)).toString());
     }
@@ -514,14 +535,19 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
                 ")[" + AggregationGenerator.nthIndex(n) + "]").toString());
     }
 
+    /**
+     * PostgreSQL has the ordered-set aggregates {@code percentile_disc} and {@code percentile_cont … WITHIN GROUP} since
+     * 9.4. A dialect made without a connection knows no version and says yes.
+     */
     @Override
     public boolean supportsPercentileDisc() {
-        return true;
+        return dialectVersion.isUnknownOrAtLeast(9, 4);
     }
 
+    /** As {@link #supportsPercentileDisc()}: since 9.4. */
     @Override
     public boolean supportsPercentileCont() {
-        return true;
+        return dialectVersion.isUnknownOrAtLeast(9, 4);
     }
 
     @Override
@@ -533,7 +559,10 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
     @Override
     public StringBuilder generateKnownFunction(org.eclipse.daanse.sql.dialect.api.generator.KnownFunction function,
             java.util.List<? extends CharSequence> arguments) {
-        if (function == org.eclipse.daanse.sql.dialect.api.generator.KnownFunction.DATE_FROM_PARTS) {
+        // make_date came with 9.4; before that the ISO text yyyy-mm-dd of the default is read as a date. A dialect
+        // made without a connection knows no version and writes make_date.
+        if (function == org.eclipse.daanse.sql.dialect.api.generator.KnownFunction.DATE_FROM_PARTS
+                && dialectVersion.isUnknownOrAtLeast(9, 4)) {
             if (arguments.size() != 3) {
                 throw new IllegalArgumentException("DATE_FROM_PARTS expects 3 argument(s), got " + arguments.size());
             }
@@ -583,10 +612,23 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
         return "DO " + quote + " BEGIN " + create + "; EXCEPTION WHEN duplicate_object THEN NULL; END " + quote;
     }
 
-    /** PostgreSQL keeps a materialized view's rows from its creation on, until it is refreshed. */
+    /**
+     * PostgreSQL keeps a materialized view's rows from its creation on, until it is refreshed: since 9.3. A dialect
+     * made without a connection knows no version and says yes.
+     */
     @Override
     public boolean supportsMaterializedViews() {
-        return true;
+        return dialectVersion.isUnknownOrAtLeast(9, 3);
+    }
+
+    /**
+     * {@code CREATE MATERIALIZED VIEW IF NOT EXISTS} came with 9.5; before that {@code ifNotExists} is not written, and
+     * the statement fails on an existing view, as the contract says.
+     */
+    @Override
+    public Optional<String> createMaterializedView(org.eclipse.daanse.sql.model.schema.TableReference view,
+            String selectSql, boolean ifNotExists) {
+        return super.createMaterializedView(view, selectSql, ifNotExists && dialectVersion.isUnknownOrAtLeast(9, 5));
     }
 
     /** PostgreSQL: a partial index, {@code CREATE INDEX … WHERE condition}. */
@@ -629,10 +671,19 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
                 + function.language() + " AS " + dollarQuoted(function.body()));
     }
 
-    /** {@code CREATE [OR REPLACE] PROCEDURE s.p (n integer, INOUT total integer) LANGUAGE l AS $$body$$}. */
+    /**
+     * {@code CREATE [OR REPLACE] PROCEDURE s.p (n integer, INOUT total integer) LANGUAGE l AS $$body$$}. PostgreSQL has
+     * procedures since 11 and an {@code OUT} parameter of a procedure since 14; before that none is written. A dialect
+     * made without a connection knows no version and writes it.
+     */
     @Override
     public Optional<String> createProcedure(RoutineDefinition procedure, boolean orReplace) {
-        if (!routineLanguages().contains(procedure.language().toLowerCase(Locale.ROOT))) {
+        if (!routineLanguages().contains(procedure.language().toLowerCase(Locale.ROOT))
+                || !dialectVersion.isUnknownOrAtLeast(11, 0)) {
+            return Optional.empty();
+        }
+        if (!dialectVersion.isUnknownOrAtLeast(14, 0)
+                && procedure.parameters().stream().anyMatch(p -> p.mode() == ParameterMode.OUT)) {
             return Optional.empty();
         }
         return Optional.of("CREATE " + (orReplace ? "OR REPLACE " : "") + "PROCEDURE "
@@ -640,15 +691,25 @@ public class PostgreSqlDialect extends AbstractJdbcDialect {
                 + " LANGUAGE " + procedure.language() + " AS " + dollarQuoted(procedure.body()));
     }
 
-    /** {@code DROP FUNCTION [IF EXISTS] s.f [(integer, text)]}: the types name one of several overloads. */
+    /**
+     * {@code DROP FUNCTION [IF EXISTS] s.f [(integer, text)]}: the types name one of several overloads. A function is
+     * named without its types since PostgreSQL 10; before that such a signature gives no statement. A dialect made
+     * without a connection knows no version and writes it.
+     */
     @Override
     public Optional<String> dropFunction(RoutineSignature function, boolean ifExists) {
+        if (function.parameterTypes() == null && !dialectVersion.isUnknownOrAtLeast(10, 0)) {
+            return Optional.empty();
+        }
         return Optional.of("DROP FUNCTION " + (ifExists ? "IF EXISTS " : "") + signature(function));
     }
 
-    /** {@code DROP PROCEDURE [IF EXISTS] s.p [(integer, integer)]}. */
+    /** {@code DROP PROCEDURE [IF EXISTS] s.p [(integer, integer)]}, from PostgreSQL 11 on, which has procedures. */
     @Override
     public Optional<String> dropProcedure(RoutineSignature procedure, boolean ifExists) {
+        if (!dialectVersion.isUnknownOrAtLeast(11, 0)) {
+            return Optional.empty();
+        }
         return Optional.of("DROP PROCEDURE " + (ifExists ? "IF EXISTS " : "") + signature(procedure));
     }
 
