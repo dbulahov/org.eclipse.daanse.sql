@@ -1093,7 +1093,8 @@ public interface DdlGenerator extends IdentifierQuoter, DialectCapabilitiesProvi
      * database has overloads. With {@code ifExists} a missing function is no error where the dialect
      * can say so.
      *
-     * @return empty where the dialect writes no routines
+     * @return empty where the dialect writes no routines, or cannot name the function without its
+     *         types where the signature gives none
      */
     default Optional<String> dropFunction(RoutineSignature function, boolean ifExists) {
         return Optional.empty();
