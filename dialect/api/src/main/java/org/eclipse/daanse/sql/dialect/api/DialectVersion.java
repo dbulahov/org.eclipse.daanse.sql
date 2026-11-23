@@ -75,6 +75,19 @@ public record DialectVersion(int major, int minor, int patch) implements Compara
         return ORDER.compare(this, o);
     }
 
+    /**
+     * The version of a major and a minor, with the patch of {@code productVersion} where that is a version of the
+     * same major and minor ({@code 8.0.44} of 8.0: 8.0.44); else the patch is 0, as of a product version that names
+     * another version ({@code 5.5.5-10.11.6-MariaDB} of 10.11). No major and no minor is {@link #UNKNOWN}.
+     */
+    static DialectVersion of(int major, int minor, String productVersion) {
+        if (major <= 0 && minor <= 0) {
+            return UNKNOWN;
+        }
+        boolean same = productVersion != null && productVersion.startsWith(major + "." + minor + ".");
+        return new DialectVersion(major, minor, same ? parsePatch(productVersion) : 0);
+    }
+
     private static int parsePatch(String productVersion) {
         if (productVersion == null) {
             return 0;

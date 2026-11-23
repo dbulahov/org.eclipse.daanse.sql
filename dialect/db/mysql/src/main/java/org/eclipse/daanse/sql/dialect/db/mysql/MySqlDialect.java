@@ -47,6 +47,7 @@ import org.eclipse.daanse.sql.dialect.api.generator.KnownFunction;
 import org.eclipse.daanse.sql.dialect.api.generator.StatementHint;
 import org.eclipse.daanse.sql.dialect.api.generator.PaginationGenerator.PagingParam;
 import org.eclipse.daanse.sql.dialect.api.generator.PaginationGenerator.PreparedPaging;
+import org.eclipse.daanse.sql.model.sql.NullsOrder;
 import org.eclipse.daanse.sql.model.sql.OrderedColumn;
 import org.eclipse.daanse.sql.dialect.db.common.AbstractJdbcDialect;
 import org.eclipse.daanse.sql.dialect.db.common.DialectUtil;
@@ -179,9 +180,24 @@ public class MySqlDialect extends AbstractJdbcDialect {
         return local;
     }
 
+    /** The alias of the row an upsert would insert, which its update columns read. */
+    private static final String UPSERT_ROW_ALIAS = "new_row";
+
     /**
-     * MySQL/MariaDB:
-     * {@code INSERT ... ON DUPLICATE KEY UPDATE col = VALUES(col), ...}.
+     * Whether an upsert reads the row it would insert by an alias, {@code INSERT … VALUES (…) AS new_row ON DUPLICATE
+     * KEY UPDATE col = new_row.col}: from MySQL 8.0.19. 8.0.20 deprecates the {@code VALUES(col)} of before, with
+     * warning 1287. Overridden by {@code MariaDBDialect}, which has no such alias. A dialect made without a connection
+     * takes such a version.
+     */
+    protected boolean upsertRowAlias() {
+        return org.eclipse.daanse.sql.dialect.api.DialectVersion.UNKNOWN.equals(dialectVersion)
+                || dialectVersion.atLeast(new org.eclipse.daanse.sql.dialect.api.DialectVersion(8, 0, 19));
+    }
+
+    /**
+     * MySQL/MariaDB: {@code INSERT … ON DUPLICATE KEY UPDATE col = new_row.col, …} where
+     * {@link #upsertRowAlias()} says so, else {@code col = VALUES(col)}; without update columns
+     * {@code ON DUPLICATE KEY UPDATE key = key}, which leaves the row of a key that is there.
      */
     @Override
     public org.eclipse.daanse.sql.dialect.api.generator.MergeGenerator mergeGenerator() {
@@ -208,13 +224,30 @@ public class MySqlDialect extends AbstractJdbcDialect {
                     sb.append(values.get(i));
                 }
                 sb.append(")");
-                if (!spec.updateColumns().isEmpty()) {
+                if (spec.updateColumns().isEmpty()) {
+                    // insert-or-ignore: a key that is there sets itself, and the row is left. Not INSERT IGNORE,
+                    // which takes a NULL in a NOT NULL column, a value too long or a missing foreign key as a
+                    // warning too, and writes a row the statement did not ask for
+                    String key = quoteIdentifier(spec.keyColumns().get(0)).toString();
+                    sb.append(" ON DUPLICATE KEY UPDATE ").append(key).append(" = ").append(key);
+                } else {
+                    boolean alias = upsertRowAlias();
+                    String row = quoteIdentifier(UPSERT_ROW_ALIAS).toString();
+                    if (alias) {
+                        sb.append(" AS ").append(row);
+                    }
                     sb.append(" ON DUPLICATE KEY UPDATE ");
                     boolean first = true;
                     for (String c : spec.updateColumns()) {
                         if (!first)
                             sb.append(", ");
-                        sb.append(quoteIdentifier(c)).append(" = VALUES(").append(quoteIdentifier(c)).append(")");
+                        String col = quoteIdentifier(c).toString();
+                        sb.append(col).append(" = ");
+                        if (alias) {
+                            sb.append(row).append('.').append(col);
+                        } else {
+                            sb.append("VALUES(").append(col).append(")");
+                        }
                         first = false;
                     }
                 }
@@ -410,13 +443,25 @@ public class MySqlDialect extends AbstractJdbcDialect {
         SESSION, GLOBAL
     }
 
+    /**
+     * From MySQL 8.0, whose REGEXP is ICU's (from 8.0.4, the first 8.0 released being 8.0.11) and reads the
+     * {@code (?-i)}, {@code \A}, {@code \z} and {@code (?:…)} the condition is written with. Before, REGEXP is Henry
+     * Spencer's, which refuses them ("repetition-operator operand invalid") and has no {@code \d}, {@code \w} or
+     * {@code \s} of a Java expression either: the expression is then matched in Java, not in SQL. MariaDB's PCRE
+     * reads them, and every MariaDB 10 and 11 passes the version. A dialect made without a connection takes such a
+     * version.
+     */
     @Override
     public boolean allowsRegularExpressionInWhereClause() {
-        return true;
+        return dialectVersion.isUnknownOrAtLeast(8, 0);
     }
 
+    /** Empty where {@link #allowsRegularExpressionInWhereClause()} says no, and of an expression Java cannot read. */
     @Override
     public Optional<String> generateRegularExpression(String source, String javaRegex) {
+        if (!allowsRegularExpressionInWhereClause()) {
+            return Optional.empty();
+        }
         try {
             Pattern.compile(javaRegex);
         } catch (PatternSyntaxException e) {
@@ -567,30 +612,79 @@ public class MySqlDialect extends AbstractJdbcDialect {
         return true; // MySQL supports all bit operations
     }
 
+    /** {@code PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY c)} where {@link #supportsPercentileDisc()} says so. */
     @Override
     public java.util.Optional<String> generatePercentileDisc(double percentile, boolean desc, String tableName,
             String columnName) {
+        if (!supportsPercentileDisc()) {
+            return java.util.Optional.empty();
+        }
         return java.util.Optional
                 .of((buildPercentileFunction("PERCENTILE_DISC", percentile, desc, tableName, columnName)).toString());
     }
 
+    /** {@code PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY c)} where {@link #supportsPercentileCont()} says so. */
     @Override
     public java.util.Optional<String> generatePercentileCont(double percentile, boolean desc, String tableName,
             String columnName) {
+        if (!supportsPercentileCont()) {
+            return java.util.Optional.empty();
+        }
         return java.util.Optional
                 .of((buildPercentileFunction("PERCENTILE_CONT", percentile, desc, tableName, columnName)).toString());
     }
 
+    /**
+     * MySQL has no {@code PERCENTILE_DISC}, as an aggregate or otherwise: 8.4 refuses
+     * {@code WITHIN GROUP (ORDER BY …)} with a syntax error, on 8.0 and 9 too. MariaDB has them as window functions
+     * only, with an OVER clause, and refuses them as an aggregate of a group the same way.
+     */
     @Override
     public boolean supportsPercentileDisc() {
-        // Numeric compare — see requiresOrderByAlias (MariaDB "10.x"/"11.x" vs "8.0").
-        return dialectVersion.isUnknownOrAtLeast(8, 0);
+        return false;
     }
 
+    /** As {@link #supportsPercentileDisc()}: MySQL has no {@code PERCENTILE_CONT}. */
     @Override
     public boolean supportsPercentileCont() {
-        // Numeric compare — see requiresOrderByAlias (MariaDB "10.x"/"11.x" vs "8.0").
-        return dialectVersion.isUnknownOrAtLeast(8, 0);
+        return false;
+    }
+
+    /**
+     * {@code GROUP_CONCAT(DISTINCT operand ORDER BY … SEPARATOR 's')}, the separator a string literal of its own, a
+     * quote and a backslash in it escaped. The list is cut at the session's {@code group_concat_max_len}, 1024 bytes
+     * unless the connection sets more ({@code SET SESSION group_concat_max_len = …}), with only warning 1260 to say
+     * so: no expression of the list can lift it.
+     */
+    /**
+     * The columns of an order, a column's NULLs first or last as asked: MySQL and MariaDB have no
+     * {@code NULLS FIRST | LAST} and refuse it with a syntax error, so the order of {@code col IS NULL} comes first,
+     * {@code col IS NULL DESC, col} for NULLS FIRST and {@code col IS NULL ASC, col} for NULLS LAST.
+     */
+    @Override
+    public CharSequence buildOrderedColumnsClause(List<OrderedColumn> columns) {
+        StringBuilder buf = new StringBuilder(64);
+        if (columns == null) {
+            return buf;
+        }
+        boolean first = true;
+        for (OrderedColumn c : columns) {
+            if (!first) {
+                buf.append(", ");
+            }
+            StringBuilder name = new StringBuilder();
+            if (c.tableName() != null) {
+                quoteIdentifier(name, c.tableName(), c.columnName());
+            } else {
+                quoteIdentifier(name, c.columnName());
+            }
+            c.nullsOrder().ifPresent(no -> buf.append(name).append(" IS NULL")
+                    .append(no == NullsOrder.FIRST ? " DESC" : " ASC").append(", "));
+            buf.append(name);
+            c.sortDirection().ifPresent(dir -> buf.append(' ').append(dir.name()));
+            first = false;
+        }
+        return buf;
     }
 
     @Override
@@ -608,7 +702,8 @@ public class MySqlDialect extends AbstractJdbcDialect {
             buf.append(buildOrderedColumnsClause(columns));
         }
         if (separator != null) {
-            buf.append(" SEPARATOR '").append(separator).append("'");
+            buf.append(" SEPARATOR ");
+            quoteStringLiteral(buf, separator);
         }
         buf.append(")");
         // GROUP_CONCAT(DISTINCT cate_id ORDER BY cate_id ASC SEPARATOR ' ')
@@ -633,6 +728,38 @@ public class MySqlDialect extends AbstractJdbcDialect {
     @Override
     public boolean supportsListAgg() {
         return true;
+    }
+
+    // -------------------- Triggers --------------------
+
+    /**
+     * MySQL and MariaDB have no WHEN in {@code CREATE TRIGGER}: a trigger with a condition fires for every row and
+     * runs its body where the condition holds, {@code FOR EACH ROW BEGIN IF (condition) THEN body; END IF; END}. The
+     * body is one statement, a {@code BEGIN … END} block or a {@code CALL}, a closing semicolon left out; JDBC sends the
+     * compound statement as one, without a client's delimiter.
+     *
+     * <p>
+     * MySQL and MariaDB have row triggers only: {@code FOR EACH STATEMENT} is a syntax error, and a row trigger does
+     * not fire once for a statement (not at all for one of no rows), so none is written.
+     *
+     * @throws UnsupportedOperationException of {@link Trigger.TriggerScope#STATEMENT}
+     */
+    @Override
+    public String createTrigger(String triggerName, Trigger.TriggerTiming timing, Trigger.TriggerEvent event,
+            TableReference table, Trigger.TriggerScope scope, String whenCondition, String body, boolean orReplace) {
+        if (scope == Trigger.TriggerScope.STATEMENT) {
+            throw new UnsupportedOperationException("MySQL and MariaDB have row triggers only: FOR EACH STATEMENT of "
+                    + triggerName + " cannot be written");
+        }
+        if (whenCondition == null || whenCondition.isBlank() || body == null || body.isBlank()) {
+            return super.createTrigger(triggerName, timing, event, table, scope, whenCondition, body, orReplace);
+        }
+        String statement = body.strip();
+        while (statement.endsWith(";")) {
+            statement = statement.substring(0, statement.length() - 1).stripTrailing();
+        }
+        String guarded = "BEGIN IF (" + whenCondition + ") THEN " + statement + "; END IF; END";
+        return super.createTrigger(triggerName, timing, event, table, scope, null, guarded, orReplace);
     }
 
     // -------------------- Trigger procedures --------------------
@@ -779,7 +906,11 @@ public class MySqlDialect extends AbstractJdbcDialect {
     /**
      * MySQL 8.0+: delegates to the metadata-free form. Before 8.0:
      * {@code ALTER TABLE t CHANGE old new <definition>} — needs
-     * {@code currentMeta} to restate the column's full definition.
+     * {@code currentMeta} to restate the column's full definition. CHANGE replaces the whole column, so the
+     * definition carries what the metadata knows of it: type, NOT NULL, DEFAULT, AUTO_INCREMENT and COMMENT. A
+     * generated column is not renamed (null): the metadata has no expression to generate it by, and CHANGE would
+     * make it a plain one. What the metadata does not carry, UNSIGNED, a character set or collation of the column's
+     * own, ON UPDATE, is lost; RENAME COLUMN keeps it.
      */
     @Override
     public String renameColumn(TableReference table, String oldName, String newName, ColumnMetaData currentMeta) {
@@ -792,6 +923,9 @@ public class MySqlDialect extends AbstractJdbcDialect {
         if (currentMeta == null) {
             throw new IllegalArgumentException("currentMeta must not be null for the CHANGE-based rename fallback");
         }
+        if (currentMeta.generatedColumn() == ColumnMetaData.GeneratedColumn.YES) {
+            return null;
+        }
         StringBuilder sb = new StringBuilder("ALTER TABLE ").append(qualified(table)).append(" CHANGE ")
                 .append(quoteIdentifier(oldName)).append(' ').append(quoteIdentifier(newName)).append(' ')
                 .append(nativeType(currentMeta));
@@ -799,7 +933,21 @@ public class MySqlDialect extends AbstractJdbcDialect {
             sb.append(" NOT NULL");
         }
         currentMeta.columnDefault().ifPresent(d -> sb.append(" DEFAULT ").append(d));
+        if (currentMeta.autoIncrement() == ColumnMetaData.AutoIncrement.YES) {
+            sb.append(" AUTO_INCREMENT");
+        }
+        currentMeta.remarks().filter(r -> !r.isEmpty()).ifPresent(r -> sb.append(" COMMENT ").append(mysqlLiteral(r)));
         return sb.toString();
+    }
+
+    /**
+     * MySQL renames an index from 5.7; 5.6 refuses {@code RENAME INDEX} with a syntax error, and an index is
+     * not renamed there ({@link #renameIndex} gives null). Overridden by {@code MariaDBDialect}, whose 10.x
+     * numbering would always pass 5.7. A dialect made without a connection takes such a version.
+     */
+    @Override
+    public boolean supportsRenameIndex() {
+        return dialectVersion.isUnknownOrAtLeast(5, 7);
     }
 
     /**

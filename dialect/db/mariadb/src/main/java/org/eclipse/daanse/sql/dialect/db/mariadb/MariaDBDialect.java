@@ -104,6 +104,16 @@ public class MariaDBDialect extends MySqlDialect {
         return dialectVersion.isUnknownOrAtLeast(10, 5);
     }
 
+    /**
+     * MariaDB's {@code RENAME INDEX} landed in 10.5.2, with {@code RENAME COLUMN}: not MySQL's 5.7, which every
+     * MariaDB 10 and 11 would pass. A dialect made without a connection takes such a version.
+     */
+    @Override
+    public boolean supportsRenameIndex() {
+        return org.eclipse.daanse.sql.dialect.api.DialectVersion.UNKNOWN.equals(dialectVersion)
+                || dialectVersion.atLeast(new org.eclipse.daanse.sql.dialect.api.DialectVersion(10, 5, 2));
+    }
+
     @Override
     public boolean supportsRenameSequence() {
         return dialectVersion.isUnknownOrAtLeast(10, 5);
@@ -195,5 +205,14 @@ public class MariaDBDialect extends MySqlDialect {
     @Override
     protected boolean createOrReplaceRoutine() {
         return true;
+    }
+
+    /**
+     * MariaDB has no alias of the row an upsert would insert: its update columns read it with
+     * {@code VALUES(col)}, on every version.
+     */
+    @Override
+    protected boolean upsertRowAlias() {
+        return false;
     }
 }
