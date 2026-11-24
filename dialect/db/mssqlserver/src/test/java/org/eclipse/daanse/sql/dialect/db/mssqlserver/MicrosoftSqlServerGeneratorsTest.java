@@ -78,7 +78,7 @@ class MicrosoftSqlServerGeneratorsTest {
     void merge_into_using_values() {
         MergeGenerator.UpsertSpec spec = upsertSpec(table("dbo", "USERS"), "ID", "NAME");
         String sql = d.mergeGenerator().upsert(spec, List.of("1", "'foo'")).orElseThrow();
-        assertThat(sql).contains("MERGE INTO \"dbo\".\"USERS\" AS T USING (VALUES (1, 'foo')) AS S")
+        assertThat(sql).contains("MERGE INTO \"dbo\".\"USERS\" WITH (HOLDLOCK) AS T USING (VALUES (1, 'foo')) AS S")
                 .contains("WHEN MATCHED THEN UPDATE SET T.\"NAME\" = S.\"NAME\"")
                 .contains("WHEN NOT MATCHED THEN INSERT");
     }
