@@ -373,28 +373,38 @@ public class DuckDbDialect extends AbstractJdbcDialect {
         };
     }
 
+    /**
+     * {@code STRING_AGG([DISTINCT] operand, 'separator' ORDER BY ...)}; without a separator DuckDB joins with a comma.
+     * A DISTINCT aggregate may only be ordered by its own argument ("ORDER BY expressions must appear in the argument
+     * list"): DISTINCT is kept where every order column is the operand, and left out where the list is ordered by
+     * another column. A quote in the separator is doubled.
+     */
     @Override
     public java.util.Optional<String> generateListAgg(CharSequence operand, boolean distinct, String separator,
             String coalesce, String onOverflowTruncate, List<OrderedColumn> columns) {
+        boolean ordered = columns != null && !columns.isEmpty();
         StringBuilder buf = new StringBuilder(64);
-        buf.append("STRING_AGG");
-        buf.append("( ");
-        if (distinct && (columns == null || columns.isEmpty())) { // DISTINCT has error if we have ORDER BY for duckDb
+        buf.append("STRING_AGG(");
+        if (distinct && (!ordered || ordersByOperandOnly(operand, columns))) {
             buf.append("DISTINCT ");
         }
         buf.append(operand);
         if (separator != null) {
-            buf.append(", '").append(separator).append("' ");
+            buf.append(", '").append(separator.replace("'", "''")).append("'");
         }
-
-        if (columns != null && !columns.isEmpty()) {
-            buf.append("ORDER BY ");
-            buf.append(buildOrderedColumnsClause(columns));
+        if (ordered) {
+            buf.append(" ORDER BY ").append(buildOrderedColumnsClause(columns));
         }
         buf.append(")");
-        // STRING_AGG(name, ', ' ORDER BY hire_date)
+        return java.util.Optional.of(buf.toString());
+    }
 
-        return java.util.Optional.of((buf).toString());
+    /** Whether every order column is the operand, as a name, a quoted name or a quoted name of its table. */
+    private boolean ordersByOperandOnly(CharSequence operand, List<OrderedColumn> columns) {
+        String op = operand.toString().trim();
+        return columns.stream()
+                .allMatch(c -> op.equals(c.columnName()) || op.equals(quoteIdentifier(c.columnName()))
+                        || (c.tableName() != null && op.equals(quoteIdentifier(c.tableName(), c.columnName()))));
     }
 
 
@@ -417,33 +427,23 @@ public class DuckDbDialect extends AbstractJdbcDialect {
         return true; // DucDb supports all bit operations
     }
 
+    /**
+     * {@code PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY col [DESC])}, the standard form, which DuckDB reads; its own
+     * {@code quantile_disc(col, p)} takes no order, so a descending percentile came out ascending.
+     */
     @Override
     public java.util.Optional<String> generatePercentileDisc(double percentile, boolean desc, String tableName,
             String columnName) {
         return java.util.Optional
-                .of((buildPercentileFunction("quantile_disc", percentile, desc, tableName, columnName)).toString());
+                .of(buildPercentileFunction("PERCENTILE_DISC", percentile, desc, tableName, columnName).toString());
     }
 
+    /** {@code PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY col [DESC])}, as {@link #generatePercentileDisc}. */
     @Override
     public java.util.Optional<String> generatePercentileCont(double percentile, boolean desc, String tableName,
             String columnName) {
         return java.util.Optional
-                .of((buildPercentileFunction("quantile_cont", percentile, desc, tableName, columnName)).toString());
-    }
-
-    public StringBuilder buildPercentileFunction(String functionName, double percentile, boolean desc, String tableName,
-            String columnName) {
-        StringBuilder buf = new StringBuilder(64);
-        buf.append(functionName).append("(");
-        if (tableName != null) {
-            quoteIdentifier(buf, tableName, columnName);
-        } else {
-            quoteIdentifier(buf, columnName);
-        }
-        buf.append(", ");
-        buf.append(percentile);
-        buf.append(")");
-        return buf;
+                .of(buildPercentileFunction("PERCENTILE_CONT", percentile, desc, tableName, columnName).toString());
     }
 
     /** The n-th value of the group's rows in their order: an ordered list, its n-th element (V-82). */
@@ -480,6 +480,12 @@ public class DuckDbDialect extends AbstractJdbcDialect {
 
     @Override
     public boolean supportsNthValue() {
+        return true;
+    }
+
+    /** The NULL values are left out of the list with {@code FILTER (WHERE v IS NOT NULL)}. */
+    @Override
+    public boolean supportsNthValueIgnoreNulls() {
         return true;
     }
 
