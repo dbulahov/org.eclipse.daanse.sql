@@ -43,6 +43,7 @@ import org.eclipse.daanse.sql.model.schema.Trigger.TriggerEvent;
 import org.eclipse.daanse.sql.model.schema.Trigger.TriggerTiming;
 import org.eclipse.daanse.sql.model.sql.BitOperation;
 import org.eclipse.daanse.sql.dialect.api.generator.KnownFunction;
+import org.eclipse.daanse.sql.dialect.api.generator.ReturningGenerator;
 import org.eclipse.daanse.sql.dialect.api.generator.StatementHint;
 import org.eclipse.daanse.sql.model.sql.OrderedColumn;
 import org.eclipse.daanse.sql.model.type.BestFitColumnType;
@@ -126,7 +127,7 @@ public class OracleDialect extends AbstractJdbcDialect {
     }
 
     private volatile org.eclipse.daanse.sql.dialect.api.generator.MergeGenerator cachedMergeGenerator;
-    private volatile org.eclipse.daanse.sql.dialect.api.generator.ReturningGenerator cachedReturningGenerator;
+    private volatile ReturningGenerator cachedReturningGenerator;
 
     /** JDBC-free constructor for SQL generation. */
     public OracleDialect() {
@@ -210,39 +211,31 @@ public class OracleDialect extends AbstractJdbcDialect {
         return local;
     }
 
+    /**
+     * Oracle writes {@code RETURNING} only with {@code INTO}, its values bound to out parameters, in every version, 23
+     * too: {@link ReturningGenerator#returningInto(List) RETURNING c1, c2 INTO ?, ?}. A {@code RETURNING} clause alone,
+     * which a query reads back as rows, fails with ORA-00925, so {@link ReturningGenerator#returning(List)} writes
+     * none. {@code *} names no column a parameter can be bound to, and is not written either.
+     */
     @Override
-    public org.eclipse.daanse.sql.dialect.api.generator.ReturningGenerator returningGenerator() {
+    public ReturningGenerator returningGenerator() {
         var local = cachedReturningGenerator;
         if (local != null)
             return local;
-        if (!dialectVersion.isUnknownOrAtLeast(23, 0)) {
-            local = super.returningGenerator();
-            cachedReturningGenerator = local;
-            return local;
-        }
-        local = new org.eclipse.daanse.sql.dialect.api.generator.ReturningGenerator() {
+        local = new ReturningGenerator() {
             @Override
-            public boolean supportsReturning() {
+            public boolean supportsReturningInto() {
                 return true;
             }
 
             @Override
-            public java.util.Optional<String> returning(java.util.List<String> columns) {
-                if (columns == null || columns.isEmpty())
-                    return java.util.Optional.empty();
-                if (columns.size() == 1 && "*".equals(columns.get(0))) {
-                    // Oracle 23c does NOT support RETURNING * — only explicit columns.
-                    return java.util.Optional.empty();
+            public Optional<String> returningInto(List<String> columns) {
+                if (columns == null || columns.isEmpty() || columns.contains("*")) {
+                    return Optional.empty();
                 }
-                StringBuilder sb = new StringBuilder(" RETURNING ");
-                boolean first = true;
-                for (String c : columns) {
-                    if (!first)
-                        sb.append(", ");
-                    sb.append(quoteIdentifier(c));
-                    first = false;
-                }
-                return java.util.Optional.of(sb.toString());
+                return Optional.of(" RETURNING " + columns.stream().map(c -> quoteIdentifier(c))
+                        .collect(Collectors.joining(", ")) + " INTO "
+                        + columns.stream().map(c -> "?").collect(Collectors.joining(", ")));
             }
         };
         cachedReturningGenerator = local;
@@ -254,27 +247,34 @@ public class OracleDialect extends AbstractJdbcDialect {
         return false;
     }
 
-    /** Oracle: no {@code IF NOT EXISTS} on any DDL. */
+    /**
+     * {@code CREATE TABLE IF NOT EXISTS} from Oracle 23 (23ai); before, the server refuses it with ORA-00922. A dialect
+     * made without a connection knows no version and says no.
+     */
     @Override
     public boolean supportsCreateTableIfNotExists() {
-        return false;
+        return dialectVersion.atLeast(23, 0);
     }
 
+    /** {@code CREATE INDEX IF NOT EXISTS} from Oracle 23, as {@link #supportsCreateTableIfNotExists()}. */
     @Override
     public boolean supportsCreateIndexIfNotExists() {
-        return false;
+        return dialectVersion.atLeast(23, 0);
     }
 
+    /** {@code DROP INDEX IF EXISTS} from Oracle 23, as {@link #supportsCreateTableIfNotExists()}. */
     @Override
     public boolean supportsDropIndexIfExists() {
-        return false;
+        return dialectVersion.atLeast(23, 0);
     }
 
+    /** {@code DROP VIEW IF EXISTS} from Oracle 23, as {@link #supportsCreateTableIfNotExists()}. */
     @Override
     public boolean supportsDropViewIfExists() {
-        return false;
+        return dialectVersion.atLeast(23, 0);
     }
 
+    /** No version of Oracle, 23 neither, drops a constraint if it exists: ORA-01735. */
     @Override
     public boolean supportsDropConstraintIfExists() {
         return false;

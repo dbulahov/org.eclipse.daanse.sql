@@ -126,9 +126,8 @@ class OracleGeneratorsRoundTripTest {
     }
 
     @Test
-    void returning_unsupported_on_pre_23c_oracle() {
-        // Oracle XE 21 reports major < 23 → generator falls through to empty default.
-        // (PG-style RETURNING was introduced in 23c, Aug 2023.)
+    void returning_unsupported() {
+        // Oracle writes RETURNING only with INTO, in every version: the generator writes no clause.
         assertThat(dialect.returningGenerator().returning(List.of("id"))).isEmpty();
     }
 
