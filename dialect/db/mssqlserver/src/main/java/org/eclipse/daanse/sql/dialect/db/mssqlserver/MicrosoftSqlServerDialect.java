@@ -33,6 +33,7 @@ import java.util.stream.Collectors;
 import org.eclipse.daanse.sql.dialect.api.generator.DdlGenerator.ParameterMode;
 import org.eclipse.daanse.sql.dialect.api.generator.DdlGenerator.RoutineDefinition;
 import org.eclipse.daanse.sql.dialect.api.generator.DdlGenerator.RoutineSignature;
+import org.eclipse.daanse.sql.dialect.api.generator.DdlGenerator.SequenceDefinition;
 
 import org.eclipse.daanse.sql.model.schema.ColumnDefinition;
 import org.eclipse.daanse.sql.model.schema.ColumnMetaData;
@@ -42,7 +43,9 @@ import org.eclipse.daanse.sql.model.schema.Trigger.TriggerEvent;
 import org.eclipse.daanse.sql.model.schema.Trigger.TriggerTiming;
 import org.eclipse.daanse.sql.dialect.api.generator.KnownFunction;
 import org.eclipse.daanse.sql.dialect.api.generator.StatementHint;
+import org.eclipse.daanse.sql.model.sql.NullsOrder;
 import org.eclipse.daanse.sql.model.sql.OrderedColumn;
+import org.eclipse.daanse.sql.model.sql.SortDirection;
 import org.eclipse.daanse.sql.dialect.db.common.AbstractJdbcDialect;
 import org.eclipse.daanse.sql.dialect.db.common.DialectUtil;
 
@@ -208,8 +211,10 @@ public class MicrosoftSqlServerDialect extends AbstractJdbcDialect {
                 if (values == null || values.size() != spec.insertColumns().size()) {
                     throw new IllegalArgumentException("values must match insertColumns in length");
                 }
+                // HOLDLOCK: without it two connections upserting the same new key at once both find no row and both
+                // insert, and one fails on the primary key (Msg 2627, on 2017 and 2019 in a database run)
                 StringBuilder sb = new StringBuilder("MERGE INTO ").append(qualified(spec.target()))
-                        .append(" AS T USING (VALUES (");
+                        .append(" WITH (HOLDLOCK) AS T USING (VALUES (");
                 for (int i = 0; i < values.size(); i++) {
                     if (i > 0)
                         sb.append(", ");
@@ -318,13 +323,18 @@ public class MicrosoftSqlServerDialect extends AbstractJdbcDialect {
                 + "') EXEC('CREATE SCHEMA " + quoteIdentifier(schemaName) + "')";
     }
 
+    /**
+     * With {@code ifExists}, guarded by {@code OBJECT_ID(…, 'U')}, which reads before 2016 too. The name it reads is
+     * the quoted one, as a literal: a name of a quote broke the statement, one of a dot or a blank was read as
+     * another name.
+     */
     @Override
     public String dropTable(String schemaName, String tableName, boolean ifExists) {
+        String quoted = quoteIdentifier(schemaName, tableName);
         if (!ifExists) {
-            return "DROP TABLE " + quoteIdentifier(schemaName, tableName);
+            return "DROP TABLE " + quoted;
         }
-        return "IF OBJECT_ID('" + (schemaName == null ? "" : schemaName + ".") + tableName
-                + "', 'U') IS NOT NULL DROP TABLE " + quoteIdentifier(schemaName, tableName);
+        return "IF OBJECT_ID(" + nLiteral(quoted) + ", N'U') IS NOT NULL DROP TABLE " + quoted;
     }
 
     @Override
@@ -486,28 +496,33 @@ public class MicrosoftSqlServerDialect extends AbstractJdbcDialect {
         };
     }
 
+    /**
+     * No percentile aggregate: SQL Server has {@code PERCENTILE_DISC} and {@code PERCENTILE_CONT … WITHIN GROUP} only
+     * as window functions, which "must have an OVER clause" (Msg 10753, on 2017 to 2025); a window in a grouped query
+     * runs over the groups, not over the rows of one group, so it is no answer either. The measure is refused, as the
+     * n-th value is.
+     */
     @Override
     public java.util.Optional<String> generatePercentileDisc(double percentile, boolean desc, String tableName,
             String columnName) {
-        return java.util.Optional
-                .of((buildPercentileFunction("PERCENTILE_DISC", percentile, desc, tableName, columnName)).toString());
+        return java.util.Optional.empty();
     }
 
+    /** No percentile aggregate, as {@link #generatePercentileDisc}. */
     @Override
     public java.util.Optional<String> generatePercentileCont(double percentile, boolean desc, String tableName,
             String columnName) {
-        return java.util.Optional
-                .of((buildPercentileFunction("PERCENTILE_CONT", percentile, desc, tableName, columnName)).toString());
+        return java.util.Optional.empty();
     }
 
     @Override
     public boolean supportsPercentileDisc() {
-        return true;
+        return false;
     }
 
     @Override
     public boolean supportsPercentileCont() {
-        return true;
+        return false;
     }
 
     /**
@@ -536,26 +551,38 @@ public class MicrosoftSqlServerDialect extends AbstractJdbcDialect {
             // declined, so the engine names the refusal instead of sending SQL the server rejects
             return java.util.Optional.empty();
         }
+        // the operand as NVARCHAR(MAX): of a type of a length, the list stops at 8000 bytes (Msg 9829); a number
+        // and a Unicode text are written whole too
         StringBuilder buf = new StringBuilder(64);
-        buf.append("STRING_AGG");
-        buf.append("( ");
-        buf.append(operand);
-        buf.append(", '");
-        if (separator != null) {
-            buf.append(separator);
-        } else {
-            buf.append(", ");
-        }
-        buf.append("'");
-        buf.append(")");
+        buf.append("STRING_AGG(CONVERT(NVARCHAR(MAX), ").append(operand).append("), N'")
+                .append((separator != null ? separator : ", ").replace("'", "''")).append("')");
         if (columns != null && !columns.isEmpty()) {
-            buf.append(" WITHIN GROUP (ORDER BY ");
-            buf.append(buildOrderedColumnsClause(columns));
-            buf.append(")");
+            buf.append(" WITHIN GROUP (ORDER BY ").append(orderedColumns(columns)).append(")");
         }
-        // STRING_AGG(CONVERT (NVARCHAR (MAX), EmailAddress), ';') WITHIN GROUP (ORDER
-        // BY EmailAddress ASC)
-        return java.util.Optional.of((buf).toString());
+        return java.util.Optional.of(buf.toString());
+    }
+
+    /**
+     * The order of the list. SQL Server knows no {@code NULLS FIRST/LAST} ("Incorrect syntax near 'NULLS'"): where
+     * a column asks for one, its NULLs are ranked with the dialect's CASE.
+     */
+    private CharSequence orderedColumns(List<OrderedColumn> columns) {
+        StringBuilder buf = new StringBuilder(64);
+        for (OrderedColumn c : columns) {
+            if (!buf.isEmpty()) {
+                buf.append(", ");
+            }
+            String expr = c.tableName() != null ? quoteIdentifier(c.tableName(), c.columnName())
+                    : quoteIdentifier(c.columnName());
+            boolean ascending = c.sortDirection().map(d -> d != SortDirection.DESC).orElse(true);
+            if (c.nullsOrder().isPresent()) {
+                buf.append(generateOrderItem(expr, true, ascending, c.nullsOrder().get() == NullsOrder.LAST));
+            } else {
+                buf.append(expr);
+                c.sortDirection().ifPresent(d -> buf.append(' ').append(d.name()));
+            }
+        }
+        return buf;
     }
 
     /**
@@ -590,6 +617,11 @@ public class MicrosoftSqlServerDialect extends AbstractJdbcDialect {
             org.eclipse.daanse.sql.model.schema.Trigger.TriggerScope scope, String whenCondition, String body) {
         if (body == null || body.isBlank()) {
             throw new IllegalArgumentException("body must not be blank for SQL Server CREATE TRIGGER");
+        }
+        if (whenCondition != null && !whenCondition.isBlank()) {
+            // left out, the trigger fired for every row the condition did not hold of too (database run 2017 to 2025)
+            throw new UnsupportedOperationException("SQL Server has no WHEN condition on a trigger; write the"
+                    + " condition into the trigger's body, over the inserted and deleted rows: " + whenCondition);
         }
         StringBuilder sb = new StringBuilder("CREATE TRIGGER ");
         sb.append(quoteIdentifier(triggerName));
@@ -822,6 +854,22 @@ public class MicrosoftSqlServerDialect extends AbstractJdbcDialect {
     public String revokeExecute(String schemaName, String routineName, boolean isFunction, String grantee) {
         return "REVOKE EXECUTE ON " + qualifiedRoutine(schemaName, routineName) + " FROM "
                 + quoteIdentifier(grantee);
+    }
+
+    /**
+     * SQL Server knows no {@code CREATE SEQUENCE IF NOT EXISTS} ("Incorrect syntax near the keyword 'IF'"): with
+     * {@code ifNotExists} the statement is guarded by the schema's sequences, as a user is by the principals. A
+     * schema of {@code null} is the user's default one.
+     */
+    @Override
+    public Optional<String> createSequence(SequenceDefinition seq, boolean ifNotExists) {
+        Optional<String> create = super.createSequence(seq, false);
+        if (!ifNotExists || create.isEmpty()) {
+            return create;
+        }
+        String schema = seq.schemaName() != null ? "SCHEMA_ID(" + nLiteral(seq.schemaName()) + ")" : "SCHEMA_ID()";
+        return Optional.of("IF NOT EXISTS (SELECT 1 FROM sys.sequences WHERE name = " + nLiteral(seq.name())
+                + " AND schema_id = " + schema + ") " + create.get());
     }
 
     /** SQL Server: {@code EXEC sp_rename 'schema.seq', 'new'}. */
