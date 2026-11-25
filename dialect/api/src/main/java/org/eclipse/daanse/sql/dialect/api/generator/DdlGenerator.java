@@ -615,9 +615,9 @@ public interface DdlGenerator extends IdentifierQuoter, DialectCapabilitiesProvi
 
     /**
      * @return true if {@code createMaterializedView} / {@code dropMaterializedView} render
-     *         statements. An indexed view (SQL Server) is a view with an index, and a ClickHouse
+     *         statements. An indexed view (SQL Server) is a view with an index, and a classic ClickHouse
      *         materialized view feeds a table from the rows inserted into another; neither keeps the
-     *         result of its query, so neither is one.
+     *         result of its query, so neither is one. A refreshable one of ClickHouse (24.10) is.
      */
     default boolean supportsMaterializedViews() {
         return false;
