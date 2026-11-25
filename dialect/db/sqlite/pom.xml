@@ -51,6 +51,19 @@
     </dependency>
     <dependency>
       <groupId>org.eclipse.daanse</groupId>
+      <artifactId>org.eclipse.daanse.sql.jdbc.record</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Container tests: the sqlite3 CLI of a given version, run in Docker. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>1.21.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.eclipse.daanse</groupId>
       <artifactId>org.eclipse.daanse.sql.dialect.db.test-support</artifactId>
       <version>${revision}</version>
       <scope>test</scope>

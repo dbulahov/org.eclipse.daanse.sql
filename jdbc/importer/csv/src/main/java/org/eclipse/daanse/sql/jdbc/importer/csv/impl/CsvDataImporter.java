@@ -287,9 +287,17 @@ public class CsvDataImporter implements FileSystemWatcherListener {
 
     }
 
+    /**
+     * The schema of a file in a directory below the base: the directory's name. Where the database has no schemas
+     * (SQLite), none, and the table goes into the connection's own.
+     */
     private Optional<SchemaReference> getSchemaFromPath(Path path) {
         Path parent = path.getParent();
         if (basePath.equals(parent)) {
+            return Optional.empty();
+        }
+        if (dialect != null && !dialect.ddlGenerator().supportsSchemas()) {
+            LOGGER.debug("No schemas in {}: {} goes into the default one", dialect.name(), path);
             return Optional.empty();
         }
         String fileName = parent.getFileName().toString();

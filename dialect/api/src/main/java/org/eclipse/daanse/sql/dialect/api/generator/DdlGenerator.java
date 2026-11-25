@@ -44,16 +44,27 @@ public interface DdlGenerator extends IdentifierQuoter, DialectCapabilitiesProvi
 
     /**
      * @param ifExists whether to include IF NOT EXISTS clause
-     * @return SQL statement to create the schema
+     * @return SQL statement to create the schema, {@code null} where the database has no schemas to create
+     *         ({@link #supportsSchemas()} is false)
      */
     String createSchema(String schemaName, boolean ifExists);
 
     /**
      * @param ifExists whether to include IF EXISTS clause
      * @param cascade  whether to include CASCADE clause
-     * @return SQL statement to drop the schema
+     * @return SQL statement to drop the schema, {@code null} where the database has no schemas to drop
+     *         ({@link #supportsSchemas()} is false)
      */
     String dropSchema(String schemaName, boolean ifExists, boolean cascade);
+
+    /**
+     * @return true if {@code createSchema} / {@code dropSchema} render statements: the database keeps schemas, name
+     *         spaces of tables inside one database, created and dropped by SQL. SQLite has none: its schemas are the
+     *         database files attached to a connection, and it refuses {@code CREATE SCHEMA}.
+     */
+    default boolean supportsSchemas() {
+        return true;
+    }
 
     // -------------------- DDL — descriptor-based --------------------
 
