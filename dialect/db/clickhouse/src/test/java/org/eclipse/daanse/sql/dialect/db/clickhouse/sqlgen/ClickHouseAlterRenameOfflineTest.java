@@ -22,8 +22,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * ClickHouse has no {@code ALTER TABLE ... RENAME TO} — table and view rename
- * both go through the standalone {@code RENAME TABLE} statement, which also
- * batches multiple pairs into one atomic statement. There is no b-tree index
+ * both go through the standalone {@code RENAME TABLE} statement, one per pair:
+ * a statement of several pairs is not atomic in ClickHouse. There is no b-tree index
  * DDL and no constraint rename; column rename is the SQL-99 default.
  */
 class ClickHouseAlterRenameOfflineTest {
@@ -49,12 +49,12 @@ class ClickHouseAlterRenameOfflineTest {
     }
 
     @Test
-    void renameTables_emits_one_atomic_RENAME_TABLE_statement() {
-        assertThat(dialect.ddlGenerator().supportsAtomicMultiRenameTable()).isTrue();
+    void renameTables_emits_one_RENAME_TABLE_statement_per_pair() {
+        assertThat(dialect.ddlGenerator().supportsAtomicMultiRenameTable()).isFalse();
         assertThat(dialect.ddlGenerator().renameTables(List.of(
                 new TableRename(TBL_A, "B"),
                 new TableRename(TBL_B, "C"))))
-                .containsExactly("RENAME TABLE \"PUBLIC\".\"A\" TO \"B\", \"PUBLIC\".\"B\" TO \"C\"");
+                .containsExactly("RENAME TABLE \"PUBLIC\".\"A\" TO \"B\"", "RENAME TABLE \"PUBLIC\".\"B\" TO \"C\"");
     }
 
     @Test

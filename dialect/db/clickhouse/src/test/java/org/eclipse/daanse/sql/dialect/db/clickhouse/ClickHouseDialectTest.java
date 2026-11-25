@@ -57,8 +57,9 @@ class ClickHouseDialectTest {
 
     @Test
     void capability_flags_reflect_clickhouse_constraints() {
-        // ClickHouse: no FK / sequences, no DROP CONSTRAINT IF EXISTS, no
-        // CREATE OR REPLACE VIEW. Most other IF EXISTS forms ARE supported.
+        // ClickHouse: no FK / sequences, no DROP CONSTRAINT IF EXISTS, no CREATE OR
+        // REPLACE VIEW (it would replace a table too, rows and all). Most other
+        // IF EXISTS forms ARE supported.
         assertFalse(dialect.supportsSequences());
         assertFalse(dialect.supportsDropConstraintIfExists());
         assertFalse(dialect.supportsCreateOrReplaceView());
@@ -152,7 +153,7 @@ class ClickHouseDialectTest {
 
         @Test
         void testSupportsNthValue() {
-            assertFalse(dialect.supportsNthValue()); // V-82: no ordered array aggregate, the window form ran over the groups
+            assertTrue(dialect.supportsNthValue()); // an aggregate over the sorted rows of the group (V-82)
         }
 
         @Test
@@ -163,7 +164,7 @@ class ClickHouseDialectTest {
         @Test
         void testGenerateListAgg() {
             String result = dialect.generateListAgg("column1", false, null, null, null, null).orElseThrow();
-            assertEquals("groupArrayArray( column1)", result);
+            assertEquals("arrayStringConcat(arrayMap(_v -> toString(_v), groupArray(column1)), ',')", result);
         }
     }
 

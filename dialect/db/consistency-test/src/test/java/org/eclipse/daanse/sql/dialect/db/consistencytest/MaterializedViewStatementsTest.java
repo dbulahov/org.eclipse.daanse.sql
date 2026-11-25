@@ -75,7 +75,9 @@ class MaterializedViewStatementsTest {
                 of("mysql", new MySqlDialect(), Expected.none()),
                 of("mariadb", new MariaDBDialect(), Expected.none()),
                 of("h2", new H2Dialect(), Expected.none()),
-                of("clickhouse", new ClickHouseDialect(), Expected.none()),
+                of("clickhouse, no version", new ClickHouseDialect(), clickhouse()),
+                of("clickhouse 24.10", new ClickHouseDialect(version(24, 10)), clickhouse()),
+                of("clickhouse 24.8", new ClickHouseDialect(version(24, 8)), Expected.none()),
                 of("duckdb", new DuckDbDialect(), Expected.none()),
                 of("sqlite", new SqliteDialect(), Expected.none()),
                 of("derby", new DerbyDialect(), Expected.none()),
@@ -96,6 +98,14 @@ class MaterializedViewStatementsTest {
                 .isEqualTo(Optional.ofNullable(expected.createIfNotExists()));
         assertThat(ddl.dropMaterializedView(VIEW, false)).isEqualTo(Optional.ofNullable(expected.drop()));
         assertThat(ddl.dropMaterializedView(VIEW, true)).isEqualTo(Optional.ofNullable(expected.dropIfExists()));
+    }
+
+    /** A refreshable materialized view, refreshed on demand in effect; ClickHouse drops it as a view. */
+    private static Expected clickhouse() {
+        String rest = " REFRESH AFTER 10 YEAR ENGINE = MergeTree() ORDER BY tuple() AS " + QUERY;
+        return new Expected("CREATE MATERIALIZED VIEW \"s\".\"mv\"" + rest,
+                "CREATE MATERIALIZED VIEW IF NOT EXISTS \"s\".\"mv\"" + rest, "DROP VIEW \"s\".\"mv\"",
+                "DROP VIEW IF EXISTS \"s\".\"mv\"");
     }
 
     private static Arguments of(String name, Dialect dialect, Expected expected) {
