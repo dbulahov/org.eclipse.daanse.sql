@@ -885,6 +885,52 @@ public class OracleDialect extends AbstractJdbcDialect {
     }
 
     /**
+     * A schema in Oracle is a user: one is created as a user without credentials, as {@link #supportsUsers} needs
+     * (Oracle 18), so on 11 there are no schemas to create. {@code CREATE SCHEMA} is Oracle's
+     * {@code CREATE SCHEMA AUTHORIZATION}, objects for a user there already, and refused here (ORA-02420), as
+     * {@code DROP SCHEMA} is (ORA-00950). A dialect made without a connection takes a version from 18 on.
+     */
+    @Override
+    public boolean supportsSchemas() {
+        return supportsUsers();
+    }
+
+    /**
+     * {@code CREATE USER [IF NOT EXISTS] "s" NO AUTHENTICATION QUOTA UNLIMITED ON USERS}: without a quota a table of
+     * the schema takes no row (ORA-01950). {@code USERS}, the default tablespace of XE and Free, must be there.
+     * {@code IF NOT EXISTS} from Oracle 23; before, and for an unknown version, it is left out. {@code null} where
+     * {@link #supportsSchemas} says no.
+     */
+    @Override
+    public String createSchema(String schemaName, boolean ifNotExists) {
+        if (!supportsSchemas()) {
+            return null;
+        }
+        return "CREATE USER " + (ifNotExists && dialectVersion.atLeast(23, 0) ? "IF NOT EXISTS " : "")
+                + quoteIdentifier(schemaName) + " NO AUTHENTICATION QUOTA UNLIMITED ON USERS";
+    }
+
+    /**
+     * {@code DROP USER [IF EXISTS] "s" CASCADE}, always with CASCADE: Oracle drops no user of objects without it
+     * (ORA-01922). {@code IF EXISTS} from Oracle 23; before, and for an unknown version, it is left out. {@code null}
+     * where {@link #supportsSchemas} says no.
+     */
+    @Override
+    public String dropSchema(String schemaName, boolean ifExists, boolean cascade) {
+        if (!supportsSchemas()) {
+            return null;
+        }
+        return "DROP USER " + (ifExists && dialectVersion.atLeast(23, 0) ? "IF EXISTS " : "")
+                + quoteIdentifier(schemaName) + " CASCADE";
+    }
+
+    /** {@code IF EXISTS} on a schema's drop from Oracle 23. */
+    @Override
+    public boolean supportsDropSchemaIfExists() {
+        return dialectVersion.atLeast(23, 0);
+    }
+
+    /**
      * Oracle builds a materialized view's rows when it is created and refreshes them on demand, its
      * defaults. {@code IF [NOT] EXISTS} from Oracle 23; before, and for an unknown version, it is left
      * out.
