@@ -364,6 +364,24 @@ public class ClickHouseDialect extends AbstractJdbcDialect {
         return dialectVersion.isUnknownOrAtLeast(22, 9);
     }
 
+    /**
+     * {@code CREATE DATABASE [IF NOT EXISTS] "s"}: a schema in ClickHouse is a database; {@code CREATE SCHEMA} is a
+     * syntax error (Code 62) in every version.
+     */
+    @Override
+    public String createSchema(String schemaName, boolean ifNotExists) {
+        return "CREATE DATABASE " + (ifNotExists ? "IF NOT EXISTS " : "") + quoteIdentifier(schemaName);
+    }
+
+    /**
+     * {@code DROP DATABASE [IF EXISTS] "s"}, which drops its tables with it: ClickHouse has no {@code CASCADE} here,
+     * and {@code DROP SCHEMA} is a syntax error (Code 62) in every version.
+     */
+    @Override
+    public String dropSchema(String schemaName, boolean ifExists, boolean cascade) {
+        return "DROP DATABASE " + (ifExists ? "IF EXISTS " : "") + quoteIdentifier(schemaName);
+    }
+
     @Override
     public boolean supportsSequences() {
         return false;
